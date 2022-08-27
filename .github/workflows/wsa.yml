@@ -125,15 +125,22 @@ jobs:
           tag: ${{ steps.vars.outputs.sha_short }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
+
+      - id: get_version
+        uses: JungWinter/split@v2.0.0
+        name: Get Version
+        with:
+          msg: ${{ steps.run.outputs.name }}
+          separator: "_"
+
       - id: create_release
         uses: actions/create-release@v1
         if: ${{ steps.checkTag.outputs.exists == 'false' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ steps.vars.outputs.sha_short }}
-          release_name: MagiskOnWSA
+          tag_name: ${{ steps.get_version.outputs._2 }}
+          release_name: ${{ steps.get_version.outputs._2 }}
           draft: false
           prerelease: false
       
