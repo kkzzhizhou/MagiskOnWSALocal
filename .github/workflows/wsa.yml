@@ -51,7 +51,7 @@ on:
       remove_amazon:
         description: "Remove Amazon AppStore"
         required: true
-        default: "keep"
+        default: "remove"
         type: choice
         options:
         - keep
