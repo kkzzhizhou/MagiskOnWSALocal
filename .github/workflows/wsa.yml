@@ -1,6 +1,9 @@
 name: Build WSA
 
 on:
+  repository_dispatch:
+  schedule:
+    - cron: '0 4 1 * *'
   workflow_dispatch:
     inputs:
       arch:
