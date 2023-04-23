@@ -1,4 +1,5 @@
-# 
+#!/usr/bin/python
+#
 # This file is part of MagiskOnWSALocal.
 #
 # MagiskOnWSALocal is free software: you can redistribute it and/or modify
@@ -17,12 +18,9 @@
 # Copyright (C) 2022 LSPosed Contributors
 #
 
-#!/usr/bin/python
-
 import sys
 
 import zipfile
-import os
 from pathlib import Path
 import platform
 
@@ -30,9 +28,9 @@ is_x86_64 = platform.machine() in ("AMD64", "x86_64")
 host_abi = "x64" if is_x86_64 else "arm64"
 arch = sys.argv[1]
 magisk_zip = sys.argv[2]
-if not os.path.exists(Path.cwd().parent / sys.argv[3] / "magisk"):
-    os.makedirs(Path.cwd().parent / sys.argv[3] / "magisk")
-workdir = Path.cwd().parent / sys.argv[3] / "magisk"
+workdir = Path(sys.argv[3]) / "magisk"
+if not Path(workdir).is_dir():
+    workdir.mkdir()
 
 abi_map = {"x64": ["x86_64", "x86"], "arm64": ["arm64-v8a", "armeabi-v7a"]}
 

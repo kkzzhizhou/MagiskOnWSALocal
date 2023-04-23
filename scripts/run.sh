@@ -1,4 +1,5 @@
-# 
+#!/bin/bash
+#
 # This file is part of MagiskOnWSALocal.
 #
 # MagiskOnWSALocal is free software: you can redistribute it and/or modify
@@ -17,58 +18,121 @@
 # Copyright (C) 2022 LSPosed Contributors
 #
 
-#!/bin/bash
-if [ ! "$BASH_VERSION" ] ; then
+# DEBUG=--debug
+# CUSTOM_MAGISK=--magisk-custom
+
+if [ ! "$BASH_VERSION" ]; then
     echo "Please do not use sh to run this script, just execute it directly" 1>&2
     exit 1
 fi
-HOST_ARCH=$(uname -m)
-if [ "$HOST_ARCH" != "x86_64" ] && [ "$HOST_ARCH" != "aarch64" ]; then
-    echo "Unsupported architectures: $HOST_ARCH"
-    exit 1
-fi
 cd "$(dirname "$0")" || exit 1
-trap 'rm -rf -- "${WORK_DIR:?}"' EXIT
-WORK_DIR=$(mktemp -d -t wsa-build-XXXXXXXXXX_) || exit 1
-DOWNLOAD_DIR=../download
-DOWNLOAD_CONF_NAME=download.list
-OUTPUT_DIR=../output
-MOUNT_DIR="$WORK_DIR"/system
-
+SUDO="$(which sudo 2>/dev/null)"
 abort() {
-    echo "An error has occurred, exit"
-    if [ -d "$WORK_DIR" ]; then
-        echo "Cleanup Work Directory"
-        if [ -d "$MOUNT_DIR" ]; then
-            if [ -d "$MOUNT_DIR/vendor" ]; then
-                sudo umount "$MOUNT_DIR"/vendor
-            fi
-            if [ -d "$MOUNT_DIR/product" ]; then
-                sudo umount "$MOUNT_DIR"/product
-            fi
-            if [ -d "$MOUNT_DIR/system_ext" ]; then
-                sudo umount "$MOUNT_DIR"/system_ext
-            fi
-            sudo umount "$MOUNT_DIR"
-        fi
-        sudo rm -rf "${WORK_DIR:?}"
-    fi
-    if [ -d "$DOWNLOAD_DIR" ]; then
-        echo "Cleanup Download Directory"
-        sudo rm -rf "${DOWNLOAD_DIR:?}"
-    fi
-    if [ -d "$OUTPUT_DIR" ]; then
-        echo "Cleanup Output Directory"
-        sudo rm -rf "${OUTPUT_DIR:?}"
-    fi
+    echo "Dependencies: an error has occurred, exit"
     exit 1
 }
-trap abort INT TERM
+require_su() {
+    if test "$(whoami)" != "root"; then
+        if [ -z "$SUDO" ] && [ "$($SUDO whoami)" != "root" ]; then
+            echo "ROOT/SUDO is required to run this script"
+            abort
+        fi
+    fi
+}
+echo "Checking and ensuring dependencies"
+check_dependencies() {
+    command -v whiptail >/dev/null 2>&1 || command -v dialog >/dev/null 2>&1 || NEED_INSTALL+=("whiptail")
+    command -v seinfo >/dev/null 2>&1 || NEED_INSTALL+=("setools")
+    command -v lzip >/dev/null 2>&1 || NEED_INSTALL+=("lzip")
+    command -v wine64 >/dev/null 2>&1 || NEED_INSTALL+=("wine")
+    command -v winetricks >/dev/null 2>&1 || NEED_INSTALL+=("winetricks")
+    command -v patchelf >/dev/null 2>&1 || NEED_INSTALL+=("patchelf")
+    command -v resize2fs >/dev/null 2>&1 || NEED_INSTALL+=("e2fsprogs")
+    command -v pip >/dev/null 2>&1 || NEED_INSTALL+=("python3-pip")
+    command -v aria2c >/dev/null 2>&1 || NEED_INSTALL+=("aria2")
+    command -v 7z > /dev/null 2>&1 || NEED_INSTALL+=("p7zip-full")
+    command -v setfattr > /dev/null 2>&1 || NEED_INSTALL+=("attr")
+    command -v xz > /dev/null 2>&1 || NEED_INSTALL+=("xz-utils")
+    command -v unzip > /dev/null 2>&1 || NEED_INSTALL+=("unzip")
+}
+check_dependencies
+osrel=$(sed -n '/^ID_LIKE=/s/^.*=//p' /etc/os-release);
+declare -A os_pm_install;
+# os_pm_install["/etc/redhat-release"]=yum
+# os_pm_install["/etc/arch-release"]=pacman
+# os_pm_install["/etc/gentoo-release"]=emerge
+os_pm_install["/etc/SuSE-release"]=zypper
+os_pm_install["/etc/debian_version"]=apt-get
+# os_pm_install["/etc/alpine-release"]=apk
 
+declare -A PM_UPDATE_MAP;
+PM_UPDATE_MAP["yum"]="check-update"
+PM_UPDATE_MAP["pacman"]="-Syu --noconfirm"
+PM_UPDATE_MAP["emerge"]="-auDN @world"
+PM_UPDATE_MAP["zypper"]="ref"
+PM_UPDATE_MAP["apt-get"]="update"
+PM_UPDATE_MAP["apk"]="update"
+
+declare -A PM_INSTALL_MAP;
+PM_INSTALL_MAP["yum"]="install -y"
+PM_INSTALL_MAP["pacman"]="-S --noconfirm --needed"
+PM_INSTALL_MAP["emerge"]="-a"
+PM_INSTALL_MAP["zypper"]="in -y"
+PM_INSTALL_MAP["apt-get"]="install -y"
+PM_INSTALL_MAP["apk"]="add"
+
+check_package_manager() {
+    for f in "${!os_pm_install[@]}"; do
+        if [[ -f $f ]]; then
+            PM="${os_pm_install[$f]}"
+            break
+        fi
+    done
+    if [[ "$osrel" = *"suse"* ]]; then
+        PM="zypper"
+    fi
+    if [ -n "$PM" ]; then
+        readarray -td ' ' UPDATE_OPTION <<<"${PM_UPDATE_MAP[$PM]} "; unset 'UPDATE_OPTION[-1]';
+        readarray -td ' ' INSTALL_OPTION <<<"${PM_INSTALL_MAP[$PM]} "; unset 'INSTALL_OPTION[-1]';
+    fi
+}
+
+check_package_manager
+if [ -n "${NEED_INSTALL[*]}" ]; then
+    if [ -z "$PM" ]; then
+        echo "Unable to determine package manager: Unsupported distros"
+        abort
+    else
+        if [ "$PM" = "zypper" ]; then
+            NEED_INSTALL_FIX=${NEED_INSTALL[*]}
+            {
+                NEED_INSTALL_FIX=${NEED_INSTALL_FIX//setools/setools-console} 2>&1
+                NEED_INSTALL_FIX=${NEED_INSTALL_FIX//whiptail/dialog} 2>&1
+                NEED_INSTALL_FIX=${NEED_INSTALL_FIX//xz-utils/xz} 2>&1
+            }  >> /dev/null
+            
+            readarray -td ' ' NEED_INSTALL <<<"$NEED_INSTALL_FIX "; unset 'NEED_INSTALL[-1]';
+        elif [ "$PM" = "apk" ]; then
+            NEED_INSTALL_FIX=${NEED_INSTALL[*]}
+            readarray -td ' ' NEED_INSTALL <<<"${NEED_INSTALL_FIX//p7zip-full/p7zip} "; unset 'NEED_INSTALL[-1]';
+        fi
+        require_su
+        if ! ($SUDO "$PM" "${UPDATE_OPTION[@]}" && $SUDO "$PM" "${INSTALL_OPTION[@]}" "${NEED_INSTALL[@]}") then abort; fi
+    fi
+fi
+pip list --disable-pip-version-check | grep -E "^requests " >/dev/null 2>&1 || python3 -m pip install requests
+
+winetricks list-installed | grep -E "^msxml6" >/dev/null 2>&1 || {
+    cp -r ../wine/.cache/* ~/.cache
+    winetricks msxml6 || abort
+}
+WHIPTAIL=$(command -v whiptail 2>/dev/null)
+DIALOG=$(command -v dialog 2>/dev/null)
+DIALOG=${WHIPTAIL:-$DIALOG}
 function Radiolist {
     declare -A o="$1"
     shift
-    if ! whiptail --nocancel --radiolist "${o[title]}" 0 0 0 "$@" 3>&1 1>&2 2>&3; then
+    if ! $DIALOG --nocancel --radiolist "${o[title]}" 0 0 0 "$@" 3>&1 1>&2 2>&3; then
         echo "${o[default]}"
     fi
 }
@@ -76,455 +140,17 @@ function Radiolist {
 function YesNoBox {
     declare -A o="$1"
     shift
-    whiptail --title "${o[title]}" --yesno "${o[text]}" 0 0
+    $DIALOG --title "${o[title]}" --yesno "${o[text]}" 0 0
 }
-
-function Gen_Rand_Str {
-    echo $(date +%s%N|md5sum|base64|head -c "$1")
-}
-
-echo "Dependencies"
-sudo apt update && sudo apt -y install setools lzip wine winetricks patchelf whiptail e2fsprogs python3-pip aria2
-sudo python3 -m pip install requests
-cp -r ../wine/.cache/* ~/.cache
-winetricks msxml6 || abort
 
 if [ GAPPS_VARIANT != "none" ]; then
-    GAPPS_BRAND="OpenGapps"
+    GAPPS_BRAND="OpenGApps"
 fi
 
-echo -e "ARCH=$ARCH\nRELEASE_TYPE=$RELEASE_TYPE\nMAGISK_VER=$MAGISK_VER\nGAPPS_VARIANT=$GAPPS_VARIANT\nREMOVE_AMAZON=$REMOVE_AMAZON\nROOT_SOL=$ROOT_SOL"
+COMPRESS_OUTPUT="--compress"
+COMPRESS_FORMAT="7z"
 
-echo "Generate Download Links"
-python3 generateWSALinks.py "$ARCH" "$RELEASE_TYPE" "$DOWNLOAD_DIR" "$DOWNLOAD_CONF_NAME" || abort
-python3 generateMagiskLink.py "$MAGISK_VER" "$DOWNLOAD_DIR" "$DOWNLOAD_CONF_NAME" || abort
-if [ $GAPPS_VARIANT != 'none' ] && [ $GAPPS_VARIANT != '' ]; then
-    if [ $GAPPS_BRAND = "OpenGapps" ]; then
-        # TODO: Keep it pico since other variants of opengapps are unable to boot successfully
-        python3 generateGappsLink.py "$ARCH" "pico" "$DOWNLOAD_DIR" "$DOWNLOAD_CONF_NAME" || abort
-        # python3 generateGappsLink.py "$ARCH" "$GAPPS_VARIANT" "$DOWNLOAD_DIR" "$DOWNLOAD_CONF_NAME" || abort
-    fi
-fi
-trap 'rm -f -- "${DOWNLOAD_DIR:?}/${DOWNLOAD_CONF_NAME}"' EXIT
-
-echo "Download Artifacts"
-if ! aria2c --no-conf --log-level=info --log="$DOWNLOAD_DIR/aria2_download.log" -x16 -s16 -j5 -c -R -m0 -d"$DOWNLOAD_DIR" -i"$DOWNLOAD_DIR"/"$DOWNLOAD_CONF_NAME"; then
-  echo "We have encountered an error while downloading files."
-  exit 1
-fi
-
-echo "Extract WSA"
-WSA_WORK_ENV="${WORK_DIR:?}"/ENV
-if [ -f "$WSA_WORK_ENV" ]; then rm -f "${WSA_WORK_ENV:?}"; fi
-export WSA_WORK_ENV
-python3 extractWSA.py "$ARCH" "$WORK_DIR" || abort
-echo -e "Extract done\n"
-source "${WORK_DIR:?}/ENV"
-
-echo "Extract Magisk"
-python3 extractMagisk.py "$ARCH" "$DOWNLOAD_DIR/magisk.zip" "$WORK_DIR" || abort
-echo -e "done\n"
-
-if [ $GAPPS_VARIANT != 'none' ] && [ $GAPPS_VARIANT != '' ]; then
-    echo "Extract GApps"
-    mkdir -p "$WORK_DIR"/gapps || abort
-    if [ $GAPPS_BRAND = "OpenGapps" ]; then
-        unzip -p "$DOWNLOAD_DIR"/gapps.zip {Core,GApps}/'*.lz' | tar --lzip -C "$WORK_DIR"/gapps -xf - -i --strip-components=2 --exclude='setupwizardtablet-x86_64' --exclude='packageinstallergoogle-all' --exclude='speech-common' --exclude='markup-lib-arm' --exclude='markup-lib-arm64' --exclude='markup-all' --exclude='setupwizarddefault-x86_64' --exclude='pixellauncher-all' --exclude='pixellauncher-common' || abort
-    else
-        unzip "$DOWNLOAD_DIR"/MindTheGapps/MindTheGapps_"$ARCH".zip "system/*" -x "system/addon.d/*" "system/system_ext/priv-app/SetupWizard/*" -d "$WORK_DIR"/gapps || abort
-        mv "$WORK_DIR"/gapps/system/* "$WORK_DIR"/gapps || abort
-        sudo rm -rf "${WORK_DIR:?}"/gapps/system || abort
-    fi
-    echo -e "Extract done\n"
-fi
-
-echo "Expand images"
-
-e2fsck -yf "$WORK_DIR"/wsa/"$ARCH"/system_ext.img || abort
-SYSTEM_EXT_SIZE=$(($(du --apparent-size -sB512 "$WORK_DIR"/wsa/"$ARCH"/system_ext.img | cut -f1) + 20000))
-if [ -d "$WORK_DIR"/gapps/system_ext ]; then
-    SYSTEM_EXT_SIZE=$(( SYSTEM_EXT_SIZE + $(du --apparent-size -sB512 "$WORK_DIR"/gapps/system_ext | cut -f1) ))
-fi
-resize2fs "$WORK_DIR"/wsa/"$ARCH"/system_ext.img "$SYSTEM_EXT_SIZE"s || abort
-
-e2fsck -yf "$WORK_DIR"/wsa/"$ARCH"/product.img || abort
-PRODUCT_SIZE=$(($(du --apparent-size -sB512 "$WORK_DIR"/wsa/"$ARCH"/product.img | cut -f1) + 20000))
-if [ -d "$WORK_DIR"/gapps/product ]; then
-    PRODUCT_SIZE=$(( PRODUCT_SIZE + $(du --apparent-size -sB512 "$WORK_DIR"/gapps/product | cut -f1) ))
-fi
-resize2fs "$WORK_DIR"/wsa/"$ARCH"/product.img "$PRODUCT_SIZE"s || abort
-
-e2fsck -yf "$WORK_DIR"/wsa/"$ARCH"/system.img || abort
-SYSTEM_SIZE=$(($(du --apparent-size -sB512 "$WORK_DIR"/wsa/"$ARCH"/system.img | cut -f1) + 20000))
-if [ -d "$WORK_DIR"/gapps ]; then
-    SYSTEM_SIZE=$(( SYSTEM_SIZE + $(du --apparent-size -sB512 "$WORK_DIR"/gapps | cut -f1) - $(du --apparent-size -sB512 "$WORK_DIR"/gapps/product | cut -f1) ))
-    if [ -d "$WORK_DIR"/gapps/system_ext ]; then
-        SYSTEM_SIZE=$(( SYSTEM_SIZE - $(du --apparent-size -sB512 "$WORK_DIR"/gapps/system_ext | cut -f1) ))
-    fi
-fi
-if [ -d "$WORK_DIR"/magisk ]; then
-    SYSTEM_SIZE=$(( SYSTEM_SIZE + $(du --apparent-size -sB512 "$WORK_DIR"/magisk/magisk | cut -f1) ))
-fi
-if [ -f "$DOWNLOAD_DIR"/magisk.zip ]; then
-    SYSTEM_SIZE=$(( SYSTEM_SIZE + $(du --apparent-size -sB512 "$DOWNLOAD_DIR"/magisk.zip | cut -f1) ))
-fi
-resize2fs "$WORK_DIR"/wsa/"$ARCH"/system.img "$SYSTEM_SIZE"s || abort
-
-e2fsck -yf "$WORK_DIR"/wsa/"$ARCH"/vendor.img || abort
-VENDOR_SIZE=$(($(du --apparent-size -sB512 "$WORK_DIR"/wsa/"$ARCH"/vendor.img | cut -f1) + 20000))
-resize2fs "$WORK_DIR"/wsa/"$ARCH"/vendor.img "$VENDOR_SIZE"s || abort
-echo -e "Expand images done\n"
-
-echo "Mount images"
-sudo mkdir "$MOUNT_DIR" || abort
-sudo mount -o loop "$WORK_DIR"/wsa/"$ARCH"/system.img "$MOUNT_DIR" || abort
-sudo mount -o loop "$WORK_DIR"/wsa/"$ARCH"/vendor.img "$MOUNT_DIR"/vendor || abort
-sudo mount -o loop "$WORK_DIR"/wsa/"$ARCH"/product.img "$MOUNT_DIR"/product || abort
-sudo mount -o loop "$WORK_DIR"/wsa/"$ARCH"/system_ext.img "$MOUNT_DIR"/system_ext || abort
-echo -e "done\n"
-
-if [ $REMOVE_AMAZON = 'remove' ]; then
-    echo "Remove Amazon AppStore"
-    find "${MOUNT_DIR:?}"/product/{etc/permissions,etc/sysconfig,framework,priv-app} | grep -e amazon -e venezia | sudo xargs rm -rf
-    echo -e "done\n"
-fi
-
-if [ "$ROOT_SOL" = 'magisk' ] || [ "$ROOT_SOL" = '' ]; then
-    echo "Integrate Magisk"
-    sudo mkdir "$MOUNT_DIR"/sbin
-    sudo chcon --reference "$MOUNT_DIR"/init.environ.rc "$MOUNT_DIR"/sbin
-    sudo chown root:root "$MOUNT_DIR"/sbin
-    sudo chmod 0700 "$MOUNT_DIR"/sbin
-    sudo cp "$WORK_DIR"/magisk/magisk/* "$MOUNT_DIR"/sbin/
-    sudo cp "$DOWNLOAD_DIR"/magisk.zip "$MOUNT_DIR"/sbin/magisk.apk
-    sudo tee -a "$MOUNT_DIR"/sbin/loadpolicy.sh <<EOF
-#!/system/bin/sh
-mkdir -p /data/adb/magisk
-cp /sbin/* /data/adb/magisk/
-chmod -R 755 /data/adb/magisk
-restorecon -R /data/adb/magisk
-for module in \$(ls /data/adb/modules); do
-    if ! [ -f "/data/adb/modules/\$module/disable" ] && [ -f "/data/adb/modules/\$module/sepolicy.rule" ]; then
-        /sbin/magiskpolicy --live --apply "/data/adb/modules/\$module/sepolicy.rule"
-    fi
-done
-EOF
-
-    sudo find "$MOUNT_DIR"/sbin -type f -exec chmod 0755 {} \;
-    sudo find "$MOUNT_DIR"/sbin -type f -exec chown root:root {} \;
-    sudo find "$MOUNT_DIR"/sbin -type f -exec chcon --reference "$MOUNT_DIR"/product {} \;
-    sudo patchelf --replace-needed libc.so "../linker/$HOST_ARCH/libc.so" "$WORK_DIR"/magisk/magiskpolicy || abort
-    sudo patchelf --replace-needed libm.so "../linker/$HOST_ARCH/libm.so" "$WORK_DIR"/magisk/magiskpolicy || abort
-    sudo patchelf --replace-needed libdl.so "../linker/$HOST_ARCH/libdl.so" "$WORK_DIR"/magisk/magiskpolicy || abort
-    sudo patchelf --set-interpreter "../linker/$HOST_ARCH/linker64" "$WORK_DIR"/magisk/magiskpolicy || abort
-    chmod +x "$WORK_DIR"/magisk/magiskpolicy || abort
-    TMP_PATH=$(Gen_Rand_Str 8)
-    echo "/dev/$TMP_PATH(/.*)?    u:object_r:magisk_file:s0" | sudo tee -a "$MOUNT_DIR"/vendor/etc/selinux/vendor_file_contexts
-    echo '/data/adb/magisk(/.*)?   u:object_r:magisk_file:s0' | sudo tee -a "$MOUNT_DIR"/vendor/etc/selinux/vendor_file_contexts
-    sudo "$WORK_DIR"/magisk/magiskpolicy --load "$MOUNT_DIR"/vendor/etc/selinux/precompiled_sepolicy --save "$MOUNT_DIR"/vendor/etc/selinux/precompiled_sepolicy --magisk "allow * magisk_file lnk_file *" || abort
-    SERVER_NAME1=$(Gen_Rand_Str 12)
-    SERVER_NAME2=$(Gen_Rand_Str 12)
-    SERVER_NAME3=$(Gen_Rand_Str 12)
-    SERVER_NAME4=$(Gen_Rand_Str 12)
-    sudo tee -a "$MOUNT_DIR"/system/etc/init/hw/init.rc <<EOF
-on post-fs-data
-    start adbd
-    mkdir /dev/$TMP_PATH
-    mount tmpfs tmpfs /dev/$TMP_PATH mode=0755
-    copy /sbin/magisk64 /dev/$TMP_PATH/magisk64
-    chmod 0755 /dev/$TMP_PATH/magisk64
-    symlink ./magisk64 /dev/$TMP_PATH/magisk
-    symlink ./magisk64 /dev/$TMP_PATH/su
-    symlink ./magisk64 /dev/$TMP_PATH/resetprop
-    copy /sbin/magisk32 /dev/$TMP_PATH/magisk32
-    chmod 0755 /dev/$TMP_PATH/magisk32
-    copy /sbin/magiskinit /dev/$TMP_PATH/magiskinit
-    chmod 0755 /dev/$TMP_PATH/magiskinit
-    copy /sbin/magiskpolicy /dev/$TMP_PATH/magiskpolicy
-    chmod 0755 /dev/$TMP_PATH/magiskpolicy
-    mkdir /dev/$TMP_PATH/.magisk 700
-    mkdir /dev/$TMP_PATH/.magisk/mirror 700
-    mkdir /dev/$TMP_PATH/.magisk/block 700
-    copy /sbin/magisk.apk /dev/$TMP_PATH/stub.apk
-    rm /dev/.magisk_unblock
-    start $SERVER_NAME1
-    start $SERVER_NAME2
-    wait /dev/.magisk_unblock 40
-    rm /dev/.magisk_unblock
-
-service $SERVER_NAME1 /system/bin/sh /sbin/loadpolicy.sh
-    user root
-    seclabel u:r:magisk:s0
-    oneshot
-
-service $SERVER_NAME2 /dev/$TMP_PATH/magisk --post-fs-data
-    user root
-    seclabel u:r:magisk:s0
-    oneshot
-
-service $SERVER_NAME3 /dev/$TMP_PATH/magisk --service
-    class late_start
-    user root
-    seclabel u:r:magisk:s0
-    oneshot
-
-on property:sys.boot_completed=1
-    mkdir /data/adb/magisk 755
-    copy /sbin/magisk.apk /data/adb/magisk/magisk.apk
-    start $SERVER_NAME4
-
-service $SERVER_NAME4 /dev/$TMP_PATH/magisk --boot-complete
-    user root
-    seclabel u:r:magisk:s0
-    oneshot
-EOF
-echo -e "Integrate Magisk done\n"
-fi
-
-echo "Merge Language Resources"
-cp "$WORK_DIR"/wsa/"$ARCH"/resources.pri "$WORK_DIR"/wsa/pri/en-us.pri
-cp "$WORK_DIR"/wsa/"$ARCH"/AppxManifest.xml "$WORK_DIR"/wsa/xml/en-us.xml
-tee "$WORK_DIR"/wsa/priconfig.xml <<EOF
-<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<resources targetOsVersion="10.0.0" majorVersion="1">
-<index root="\" startIndexAt="\">
-    <indexer-config type="folder" foldernameAsQualifier="true" filenameAsQualifier="true" qualifierDelimiter="."/>
-    <indexer-config type="PRI"/>
-</index>
-</resources>
-EOF
-wine64 ../wine/"$HOST_ARCH"/makepri.exe new /pr "$WORK_DIR"/wsa/pri /in MicrosoftCorporationII.WindowsSubsystemForAndroid /cf "$WORK_DIR"/wsa/priconfig.xml /of "$WORK_DIR"/wsa/"$ARCH"/resources.pri /o
-sed -i -zE "s/<Resources.*Resources>/<Resources>\n$(cat "$WORK_DIR"/wsa/xml/* | grep -Po '<Resource [^>]*/>' | sed ':a;N;$!ba;s/\n/\\n/g' | sed 's/\$/\\$/g' | sed 's/\//\\\//g')\n<\/Resources>/g" "$WORK_DIR"/wsa/"$ARCH"/AppxManifest.xml
-echo -e "Merge Language Resources done\n"
-
-echo "Add extra packages"
-sudo cp -r ../"$ARCH"/system/* "$MOUNT_DIR" || abort
-sudo find "$MOUNT_DIR"/system/priv-app -type d -exec chmod 0755 {} \;
-sudo find "$MOUNT_DIR"/system/priv-app -type f -exec chmod 0644 {} \;
-sudo find "$MOUNT_DIR"/system/priv-app -exec chcon --reference="$MOUNT_DIR"/system/priv-app {} \;
-echo -e "Add extra packages done\n"
-
-if [ $GAPPS_VARIANT != 'none' ] && [ $GAPPS_VARIANT != '' ]; then
-    echo "Integrate GApps"
-    cp -r ../"$ARCH"/gapps/* "$WORK_DIR"/gapps || abort
-    for d in $(find "$WORK_DIR"/gapps -mindepth 1 -type d -type d); do
-        sudo chmod 0755 "$d"
-        sudo chown root:root "$d"
-    done
-    for f in $(find "$WORK_DIR"/gapps -type f); do
-        type=$(echo "$f" | sed 's/.*\.//')
-        if [ "$type" == "sh" ] || [ "$type" == "$f" ]; then
-            sudo chmod 0755 "$f"
-        else
-            sudo chmod 0644 "$f"
-        fi
-        sudo chown root:root "$f"
-        sudo chcon -h --reference="$MOUNT_DIR"/product/etc/permissions/com.android.settings.intelligence.xml "$f"
-        sudo chcon --reference="$MOUNT_DIR"/product/etc/permissions/com.android.settings.intelligence.xml "$f"
-    done
-    shopt -s extglob
-    sudo cp --preserve=a -r "$WORK_DIR"/gapps/product/* "$MOUNT_DIR"/product || abort
-    sudo rm -rf "${WORK_DIR:?}"/gapps/product || abort
-    if [ $GAPPS_BRAND = "MindTheGapps" ]; then
-        mv "$WORK_DIR"/gapps/priv-app/* "$WORK_DIR"/gapps/system_ext/priv-app || abort
-        sudo cp --preserve=a -r "$WORK_DIR"/gapps/system_ext/* "$MOUNT_DIR"/system_ext/ || abort
-        ls "$WORK_DIR"/gapps/system_ext/etc/ | xargs -n 1 -I dir sudo find "$MOUNT_DIR"/system_ext/etc/dir -type f -exec chmod 0644 {} \;
-        ls "$WORK_DIR"/gapps/system_ext/etc/ | xargs -n 1 -I dir sudo find "$MOUNT_DIR"/system_ext/etc/dir -type d -exec chcon --reference="$MOUNT_DIR"/system_ext/etc/permissions {} \;
-        ls "$WORK_DIR"/gapps/system_ext/etc/ | xargs -n 1 -I dir sudo find "$MOUNT_DIR"/system_ext/etc/dir -type f -exec chcon --reference="$MOUNT_DIR"/system_ext/etc/permissions {} \;
-        if [ -e "$MOUNT_DIR"/system_ext/priv-app/SetupWizard ] ; then
-            rm -rf "${MOUNT_DIR:?}/system_ext/priv-app/Provision"
-        fi
-        sudo rm -rf "${WORK_DIR:?}"/gapps/system_ext || abort
-    fi
-    sudo cp --preserve=a -r "$WORK_DIR"/gapps/* "$MOUNT_DIR"/system || abort
-
-    sudo find "$MOUNT_DIR"/system/{app,etc,framework,priv-app} -exec chown root:root {} \;
-    sudo find "$MOUNT_DIR"/product/{app,etc,overlay,priv-app,lib64,lib,framework} -exec chown root:root {} \;
-
-    sudo find "$MOUNT_DIR"/system/{app,etc,framework,priv-app} -type d -exec chmod 0755 {} \;
-    sudo find "$MOUNT_DIR"/product/{app,etc,overlay,priv-app,lib64,lib,framework} -type d -exec chmod 0755 {} \;
-
-    sudo find "$MOUNT_DIR"/system/{app,framework,priv-app} -type f -exec chmod 0644 {} \;
-    sudo find "$MOUNT_DIR"/product/{app,etc,overlay,priv-app,lib64,lib,framework} -type f -exec chmod 0644 {} \;
-
-    sudo find "$MOUNT_DIR"/system/{app,framework,priv-app} -type d -exec chcon --reference="$MOUNT_DIR"/system/app {} \;
-    sudo find "$MOUNT_DIR"/product/{app,etc,overlay,priv-app,lib64,lib,framework} -type d -exec chcon --reference="$MOUNT_DIR"/product/app {} \;
-
-    sudo find "$MOUNT_DIR"/system/{app,framework,priv-app} -type f -exec chcon --reference="$MOUNT_DIR"/system/framework/ext.jar {} \;
-    sudo find "$MOUNT_DIR"/product/{app,etc,overlay,priv-app,lib64,lib,framework} -type f -exec chcon --reference="$MOUNT_DIR"/product/etc/permissions/com.android.settings.intelligence.xml {} \;
-
-    if [ $GAPPS_BRAND = "OpenGapps" ]; then
-        ls "$WORK_DIR"/gapps/etc/ | xargs -n 1 -I dir sudo find "$MOUNT_DIR"/system/etc/dir -type f -exec chmod 0644 {} \;
-        ls "$WORK_DIR"/gapps/etc/ | xargs -n 1 -I dir sudo find "$MOUNT_DIR"/system/etc/dir -type d -exec chcon --reference="$MOUNT_DIR"/system/etc/permissions {} \;
-        ls "$WORK_DIR"/gapps/etc/ | xargs -n 1 -I dir sudo find "$MOUNT_DIR"/system/etc/dir -type f -exec chcon --reference="$MOUNT_DIR"/system/etc/permissions {} \;
-    else
-        sudo find "$MOUNT_DIR"/system_ext/{priv-app,etc} -exec chown root:root {} \;
-        sudo find "$MOUNT_DIR"/system_ext/{priv-app,etc} -type d -exec chmod 0755 {} \;
-        sudo find "$MOUNT_DIR"/system_ext/{priv-app,etc} -type f -exec chmod 0644 {} \;
-        sudo find "$MOUNT_DIR"/system_ext/{priv-app,etc} -type d -exec chcon --reference="$MOUNT_DIR"/system_ext/priv-app {} \;
-        sudo find "$MOUNT_DIR"/system_ext/{priv-app,etc} -type f -exec chcon --reference="$MOUNT_DIR"/system_ext/etc/permissions/com.android.settings.xml {} \;
-    fi
-
-    sudo patchelf --replace-needed libc.so "../linker/$HOST_ARCH/libc.so" "$WORK_DIR"/magisk/magiskpolicy || abort
-    sudo patchelf --replace-needed libm.so "../linker/$HOST_ARCH/libm.so" "$WORK_DIR"/magisk/magiskpolicy || abort
-    sudo patchelf --replace-needed libdl.so "../linker/$HOST_ARCH/libdl.so" "$WORK_DIR"/magisk/magiskpolicy || abort
-    sudo patchelf --set-interpreter "../linker/$HOST_ARCH/linker64" "$WORK_DIR"/magisk/magiskpolicy || abort
-    chmod +x "$WORK_DIR"/magisk/magiskpolicy || abort
-    sudo "$WORK_DIR"/magisk/magiskpolicy --load "$MOUNT_DIR"/vendor/etc/selinux/precompiled_sepolicy --save "$MOUNT_DIR"/vendor/etc/selinux/precompiled_sepolicy "allow gmscore_app gmscore_app vsock_socket { create connect write read }" "allow gmscore_app device_config_runtime_native_boot_prop file read" "allow gmscore_app system_server_tmpfs dir search" "allow gmscore_app system_server_tmpfs file open" || abort
-    echo -e "Integrate GApps done\n"
-fi
-
-if [ $GAPPS_VARIANT != 'none' ] && [ $GAPPS_VARIANT != '' ]; then
-    echo "Fix GApps prop"
-    sudo python3 fixGappsProp.py "$MOUNT_DIR" || abort
-    echo -e "done\n"
-fi
-
-echo "Umount images"
-sudo find "$MOUNT_DIR" -exec touch -amt 200901010000.00 {} \; >/dev/null 2>&1
-sudo umount "$MOUNT_DIR"/vendor
-sudo umount "$MOUNT_DIR"/product
-sudo umount "$MOUNT_DIR"/system_ext
-sudo umount "$MOUNT_DIR"
-echo -e "done\n"
-
-echo "Shrink images"
-e2fsck -yf "$WORK_DIR"/wsa/"$ARCH"/system.img || abort
-resize2fs -M "$WORK_DIR"/wsa/"$ARCH"/system.img || abort
-e2fsck -yf "$WORK_DIR"/wsa/"$ARCH"/vendor.img || abort
-resize2fs -M "$WORK_DIR"/wsa/"$ARCH"/vendor.img || abort
-e2fsck -yf "$WORK_DIR"/wsa/"$ARCH"/product.img || abort
-resize2fs -M "$WORK_DIR"/wsa/"$ARCH"/product.img || abort
-e2fsck -yf "$WORK_DIR"/wsa/"$ARCH"/system_ext.img || abort
-resize2fs -M "$WORK_DIR"/wsa/"$ARCH"/system_ext.img || abort
-echo -e "Shrink images done\n"
-
-echo "Remove signature and add scripts"
-sudo rm -rf "${WORK_DIR:?}"/wsa/"$ARCH"/\[Content_Types\].xml "$WORK_DIR"/wsa/"$ARCH"/AppxBlockMap.xml "$WORK_DIR"/wsa/"$ARCH"/AppxSignature.p7x "$WORK_DIR"/wsa/"$ARCH"/AppxMetadata || abort
-cp "$DOWNLOAD_DIR"/vclibs.appx "$DOWNLOAD_DIR"/xaml.appx "$WORK_DIR"/wsa/"$ARCH" || abort
-tee "$WORK_DIR"/wsa/"$ARCH"/Install.ps1 <<EOF
-# Automated Install script by Midonei
-# http://github.com/doneibcn
-function Test-Administrator {
-    [OutputType([bool])]
-    param()
-    process {
-        [Security.Principal.WindowsPrincipal]\$user = [Security.Principal.WindowsIdentity]::GetCurrent();
-        return \$user.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator);
-    }
-}
-
-function Finish {
-    Clear-Host
-    Start-Process "wsa://com.topjohnwu.magisk"
-    Start-Process "wsa://com.android.vending"
-}
-
-if (-not (Test-Administrator)) {
-    Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Bypass -Force
-    \$proc = Start-Process -PassThru -WindowStyle Hidden -Verb RunAs powershell.exe -Args "-executionpolicy bypass -command Set-Location '\$PSScriptRoot'; &'\$PSCommandPath' EVAL"
-    \$proc.WaitForExit()
-    if (\$proc.ExitCode -ne 0) {
-        Clear-Host
-        Write-Warning "Failed to launch start as Administrator\`r\`nPress any key to exit"
-        \$null = \$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown');
-    }
-    exit
-}
-elseif ((\$args.Count -eq 1) -and (\$args[0] -eq "EVAL")) {
-    Start-Process powershell.exe -Args "-executionpolicy bypass -command Set-Location '\$PSScriptRoot'; &'\$PSCommandPath'"
-    exit
-}
-
-if (((Test-Path -Path $(ls -Q "$WORK_DIR"/wsa/"$ARCH" | paste -sd "," -)) -eq \$false).Count) {
-    Write-Error "Some files are missing in the folder. Please try to build again. Press any key to exist"
-    \$null = \$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
-    exit 1
-}
-
-reg add "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" /t REG_DWORD /f /v "AllowDevelopmentWithoutDevLicense" /d "1"
-
-\$VMP = Get-WindowsOptionalFeature -Online -FeatureName 'VirtualMachinePlatform'
-if (\$VMP.State -ne "Enabled") {
-    Enable-WindowsOptionalFeature -Online -NoRestart -FeatureName 'VirtualMachinePlatform'
-    Clear-Host
-    Write-Warning "Need restart to enable virtual machine platform\`r\`nPress y to restart or press any key to exit"
-    \$key = \$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
-    If ("y" -eq \$key.Character) {
-        Restart-Computer -Confirm
-    }
-    Else {
-        exit 1
-    }
-}
-
-Add-AppxPackage -ForceApplicationShutdown -ForceUpdateFromAnyVersion -Path vclibs.appx
-Add-AppxPackage -ForceApplicationShutdown -ForceUpdateFromAnyVersion -Path xaml.appx
-
-\$Installed = \$null
-\$Installed = Get-AppxPackage -Name 'MicrosoftCorporationII.WindowsSubsystemForAndroid'
-
-If ((\$null -ne \$Installed) -and (-not (\$Installed.IsDevelopmentMode))) {
-    Clear-Host
-    Write-Warning "There is already one installed WSA. Please uninstall it first.\`r\`nPress y to uninstall existing WSA or press any key to exit"
-    \$key = \$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
-    If ("y" -eq \$key.Character) {
-        Remove-AppxPackage -Package \$Installed.PackageFullName
-    }
-    Else {
-        exit 1
-    }
-}
-Clear-Host
-Write-Host "Installing MagiskOnWSA..."
-Stop-Process -Name "wsaclient" -ErrorAction "silentlycontinue"
-Add-AppxPackage -ForceApplicationShutdown -ForceUpdateFromAnyVersion -Register .\AppxManifest.xml
-if (\$?) {
-    Finish
-}
-Elseif (\$null -ne \$Installed) {
-    Clear-Host
-    Write-Host "Failed to update, try to uninstall existing installation while preserving userdata..."
-    Remove-AppxPackage -PreserveApplicationData -Package \$Installed.PackageFullName
-    Add-AppxPackage -ForceApplicationShutdown -ForceUpdateFromAnyVersion -Register .\AppxManifest.xml
-    if (\$?) {
-        Finish
-    }
-}
-Write-Host "All Done\`r\`nPress any key to exit"
-\$null = \$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
-EOF
-echo -e "Remove signature and add scripts done\n"
-
-echo "Generate info"
-
-if [[ "$ROOT_SOL" = "none" ]]; then
-    name1=""
-elif [[ "$ROOT_SOL" = "" ]]; then
-    name1="-with-magisk"
-else
-    name1="-with-$ROOT_SOL"
-fi
-if [[ "$GAPPS_VARIANT" = "none" || "$GAPPS_VARIANT" = "" ]]; then
-    name2="-NoGApps"
-else
-    if [ "$GAPPS_VARIANT" != "pico" ] && [ $GAPPS_BRAND = "OpenGapps" ]; then
-        echo ":warning: Since OpenGapps doesn't officially support Android 12.1 yet, lock the variant to pico!"
-    fi
-    name2="-GApps-${GAPPS_VARIANT}"
-fi
-artifact_name="WSA${name1}${name2}_${WSA_VER}_${ARCH}_${WSA_REL}"
-echo "$artifact_name"
-echo -e "\nFinishing building...."
-if [ ! -d "$OUTPUT_DIR" ]; then
-    mkdir "$OUTPUT_DIR"
-fi
-
-rm -f "${OUTPUT_DIR:?}"/"$artifact_name.7z" || abort
-7z a "$OUTPUT_DIR"/"$artifact_name.7z" "$WORK_DIR/wsa/$ARCH/" || abort
-
-echo -e "done\n"
-
-echo "Cleanup Work Directory"
-sudo rm -rf "${WORK_DIR:?}"
-echo "done"
+declare -A RELEASE_TYPE_MAP=(["retail"]="retail" ["release preview"]="RP" ["insider slow"]="WIS" ["insider fast"]="WIF")
+COMMAND_LINE=(--arch "$ARCH" --release-type "${RELEASE_TYPE_MAP[$RELEASE_TYPE]}" --magisk-ver "$MAGISK_VER" --gapps-brand "$GAPPS_BRAND" --gapps-variant "$GAPPS_VARIANT" "$REMOVE_AMAZON" --root-sol "$ROOT_SOL" "$COMPRESS_OUTPUT" "$OFFLINE" "$DEBUG" "$CUSTOM_MAGISK" --debug --compress-format "$COMPRESS_FORMAT")
+echo "COMMAND_LINE=${COMMAND_LINE[*]}"
+./build.sh "${COMMAND_LINE[@]}"

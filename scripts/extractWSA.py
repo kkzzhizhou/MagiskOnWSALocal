@@ -1,4 +1,5 @@
-# 
+#!/usr/bin/python
+#
 # This file is part of MagiskOnWSALocal.
 #
 # MagiskOnWSALocal is free software: you can redistribute it and/or modify
@@ -17,34 +18,28 @@
 # Copyright (C) 2022 LSPosed Contributors
 #
 
-#!/usr/bin/python
-
 import sys
 
-import requests
-from xml.dom import minidom
-import html
 import warnings
-import re
 import zipfile
 import os
-import urllib.request
 from pathlib import Path
 
 warnings.filterwarnings("ignore")
 
 arch = sys.argv[1]
 
-if not os.path.exists(Path.cwd().parent / sys.argv[2] / "wsa"):
-    os.makedirs(Path.cwd().parent / sys.argv[2] / "wsa")
 zip_name = ""
-workdir = Path.cwd().parent / sys.argv[2] / "wsa"
-with zipfile.ZipFile(Path.cwd().parent / "download/wsa.zip") as zip:
+wsa_zip_path= Path(sys.argv[2]).resolve()
+workdir = Path(sys.argv[3]) / "wsa"
+if not Path(workdir).is_dir():
+    workdir.mkdir()
+with zipfile.ZipFile(wsa_zip_path) as zip:
     for f in zip.filelist:
         if arch in f.filename.lower():
             zip_name = f.filename
             output_name = zip_name[11:-5]
-            if not os.path.isfile(workdir / zip_name):
+            if not Path(workdir / zip_name).is_file():
                 zip_path = workdir / zip_name
                 print(f"unzipping to {workdir}", flush=True)
                 zip.extract(f, workdir)
@@ -72,6 +67,6 @@ with zipfile.ZipFile(Path.cwd().parent / "download/wsa.zip") as zip:
                         g.filename = f'{name}.xml'
                         l.extract(g, workdir / 'xml')
 with zipfile.ZipFile(zip_path) as zip:
-    if not os.path.isdir(workdir / arch):
+    if not Path(workdir / arch).is_dir():
         print(f"unzipping from {zip_path}", flush=True)
         zip.extractall(workdir / arch)

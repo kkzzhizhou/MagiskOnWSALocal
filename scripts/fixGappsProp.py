@@ -1,4 +1,5 @@
-# 
+#!/usr/bin/python
+#
 # This file is part of MagiskOnWSALocal.
 #
 # MagiskOnWSALocal is free software: you can redistribute it and/or modify
@@ -19,8 +20,8 @@
 
 from __future__ import annotations
 from io import TextIOWrapper
-from os import system, path
 from typing import OrderedDict
+from pathlib import Path
 import sys
 class Prop(OrderedDict):
     def __init__(self, file: TextIOWrapper) -> None:
@@ -60,7 +61,7 @@ def fingerprint(sec: str, p: Prop) -> str:
 
 
 def fix_prop(sec, prop):
-    if not path.exists(prop):
+    if not Path(prop).is_file():
         return
 
     print(f"fixing {prop}", flush=True)
